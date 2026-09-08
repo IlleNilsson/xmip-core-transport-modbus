@@ -21,6 +21,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
 use transport::error::{Result, classify, protocol_error};
+use transport::socket;
 use transport::{Arrived, Directions, Transport};
 
 /// The Modbus protocol identifier in the MBAP header: always zero.
@@ -208,12 +209,7 @@ impl ModbusTransport {
     /// # Errors
     /// Where the address is taken, malformed, or not permitted.
     pub fn bind(&self) -> Result<(TcpListener, String)> {
-        let listener =
-            TcpListener::bind(&self.bind).map_err(|e| classify("binding the listener", &e))?;
-        let local = listener
-            .local_addr()
-            .map_err(|e| classify("reading the bound address", &e))?;
-        Ok((listener, local.to_string()))
+        socket::bind_tcp(&self.bind)
     }
 
     /// Accept one client on an already-bound listener.
@@ -221,10 +217,7 @@ impl ModbusTransport {
     /// # Errors
     /// Where the connection could not be accepted.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Connection> {
-        let (stream, peer) = listener
-            .accept()
-            .map_err(|e| classify("accepting a connection", &e))?;
-        self.settle(&stream)?;
+        let (stream, peer) = socket::accept_tcp(listener, self.timeout)?;
         Ok(Connection { stream, peer })
     }
 
@@ -233,9 +226,7 @@ impl ModbusTransport {
     /// # Errors
     /// Where the peer refused or could not be reached.
     pub fn connect(&self, target: &str) -> Result<Client> {
-        let stream =
-            TcpStream::connect(target).map_err(|e| classify("connecting to the peer", &e))?;
-        self.settle(&stream)?;
+        let stream = socket::connect_tcp(target, self.timeout)?;
         Ok(Client {
             stream,
             unit: self.unit,
@@ -249,15 +240,6 @@ impl ModbusTransport {
     /// As [`ModbusTransport::connect`] and [`Client::request`].
     pub fn exchange(&self, target: &str, pdu: &[u8]) -> Result<Vec<u8>> {
         self.connect(target)?.request(pdu)
-    }
-
-    fn settle(&self, stream: &TcpStream) -> Result<()> {
-        if let Some(timeout) = self.timeout {
-            stream
-                .set_read_timeout(Some(timeout))
-                .map_err(|e| classify("setting the read timeout", &e))?;
-        }
-        Ok(())
     }
 }
 
