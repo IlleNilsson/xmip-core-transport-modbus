@@ -21,6 +21,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
 use transport::error::{Result, classify, protocol_error};
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, Transport};
 
@@ -173,6 +174,7 @@ impl Client {
     }
 }
 
+#[derive(Clone)]
 pub struct ModbusTransport {
     bind: String,
     timeout: Option<Duration>,
@@ -270,9 +272,104 @@ impl Transport for ModbusTransport {
     }
 }
 
+impl ModbusTransport {
+    /// Both ends on this machine: an ephemeral local port, the loopback
+    /// timeout on either side of the connection.
+    #[must_use]
+    pub fn loopback() -> Self {
+        Self::new("127.0.0.1:0").timing_out_after(LOOPBACK_TIMEOUT)
+    }
+}
+
+/// A bound server waiting for its one client: every request echoed, the
+/// PDUs joined in order into one Stream.
+struct Listening {
+    transport: ModbusTransport,
+    listener: TcpListener,
+    address: String,
+}
+
+impl FarEnd for Listening {
+    fn address(&self) -> &str {
+        &self.address
+    }
+
+    fn take_one(self: Box<Self>) -> Result<Arrived> {
+        let mut connection = self.transport.accept_one(&self.listener)?;
+        let mut origin = String::from("modbus://");
+        let mut bytes = Vec::new();
+        while let Some((arrived, header)) = connection.next_request()? {
+            connection.respond(header, &arrived.bytes)?;
+            origin = arrived.origin_uri;
+            bytes.extend_from_slice(&arrived.bytes);
+        }
+        Ok(Arrived::new(origin, bytes))
+    }
+}
+
+/// A Stream longer than one PDU travels as transactions in turn on one
+/// connection, each echoed back before the next goes.
+impl Loopback for ModbusTransport {
+    fn far_end(&self) -> Result<Box<dyn FarEnd>> {
+        let (listener, address) = self.bind()?;
+        Ok(Box::new(Listening {
+            transport: self.clone(),
+            listener,
+            address,
+        }))
+    }
+
+    fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
+        let mut client = self.clone().connect(address)?;
+        for pdu in payload.chunks(MAX_PDU) {
+            if client.request(pdu)? != pdu {
+                return Err(protocol_error("the echo differed"));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shapes a protocol breaks on, as the Playground lists them.
+    fn edge_payloads() -> Vec<(&'static str, Vec<u8>)> {
+        vec![
+            ("empty", Vec::new()),
+            ("one byte", vec![0x2a]),
+            ("every byte", (0..=255).collect()),
+            ("nul run", vec![0; 512]),
+            ("high bytes", vec![0xff; 512]),
+            ("crlf storm", b"\r\n".repeat(400)),
+        ]
+    }
+
+    #[test]
+    fn a_loopback_round_carries_a_stream_as_transactions() {
+        let loopback = ModbusTransport::loopback();
+        let arrived = loopback.round(b"read holding").expect("round");
+        assert_eq!(arrived.bytes, b"read holding");
+        assert!(arrived.origin_uri.contains("/unit/1?transaction=1"));
+        let long = vec![0x2a; 1000];
+        let arrived = loopback.round(&long).expect("four transactions");
+        assert_eq!(arrived.bytes, long);
+        assert!(arrived.origin_uri.ends_with("?transaction=4"));
+        assert!(loopback.ceiling().is_none());
+        assert!(loopback.refuses(&long).is_none());
+    }
+
+    #[test]
+    fn the_loopback_returns_the_edges_whole() {
+        let loopback = ModbusTransport::loopback();
+        for (name, bytes) in edge_payloads() {
+            let arrived = loopback
+                .round(&bytes)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(arrived.bytes, bytes, "{name}");
+        }
+    }
 
     #[test]
     fn an_adu_round_trips_and_a_bad_one_is_refused() {
