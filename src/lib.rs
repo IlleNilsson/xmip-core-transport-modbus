@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use transport::Configured;
 use transport::error::{Result, classify, protocol_error};
+use transport::kept::Kept;
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
@@ -182,6 +183,8 @@ pub struct ModbusTransport {
     bind: String,
     timeout: Option<Duration>,
     unit: u8,
+    /// The listener the first receive binds, and every receive takes from.
+    receiving: Kept<TcpListener>,
 }
 
 impl ModbusTransport {
@@ -192,6 +195,7 @@ impl ModbusTransport {
             bind: bind.into(),
             timeout: None,
             unit: 1,
+            receiving: Kept::new(),
         }
     }
 
@@ -298,9 +302,10 @@ impl Transport for ModbusTransport {
 
     /// One client's requests, each acknowledged with an empty response so the
     /// client proceeds. A Location that answers with data drives [`Connection`].
+    /// Taken from the listener the first receive bound and kept.
     fn receive(&self) -> Result<Vec<Arrived>> {
-        let (listener, _) = self.bind()?;
-        let mut connection = self.accept_one(&listener)?;
+        let listener = self.receiving.bound(|| self.bind())?;
+        let mut connection = self.accept_one(listener)?;
         let mut arrived = Vec::new();
         while let Some((request, header)) = connection.next_request()? {
             connection.respond(header, &[])?;
@@ -359,6 +364,16 @@ impl Loopback for ModbusTransport {
 mod tests {
     use super::*;
     use transport::payload::edge_payloads;
+
+    #[test]
+    fn every_receive_takes_from_the_listener_the_first_bound() {
+        let receiver = ModbusTransport::loopback();
+        receiver.receiving.bound(|| receiver.bind()).expect("bound");
+        let address = receiver.receiving.address().expect("address");
+        transport::kept::held_across_receives(&receiver, address, 5, |at, payload| {
+            ModbusTransport::loopback().send(at, payload)
+        });
+    }
 
     #[test]
     fn modbus_declares_its_settings_and_reads_through_them() {
