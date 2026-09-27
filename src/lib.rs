@@ -20,11 +20,13 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
+use transport::Configured;
 use transport::error::{Result, classify, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
 use transport::socket;
 use transport::{Arrived, Directions, Transport};
+use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
 /// The Modbus protocol identifier in the MBAP header: always zero.
 const PROTOCOL: u16 = 0;
@@ -246,6 +248,45 @@ impl ModbusTransport {
     }
 }
 
+impl Configured for ModbusTransport {
+    /// The address is where a Receive Location listens as a server and
+    /// where a Send Location connects as a client.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "unit",
+                kind: Kind::Integer {
+                    minimum: 0,
+                    maximum: 255,
+                },
+                presence: Presence::Optional,
+                meaning: "The unit identifier a Send Location addresses; unit 1 when left out.",
+                applies: Applies::Send,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long a connection is waited for and a peer that stops mid-frame.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
+        let mut transport = Self::new(address);
+        if let Some(unit) = settings.optional_integer("unit") {
+            // The declaration holds it within a byte.
+            transport = transport.for_unit(u8::try_from(unit).unwrap_or(0));
+        }
+        Ok(match settings.optional_duration("timeout") {
+            Some(timeout) => transport.timing_out_after(timeout),
+            None => transport,
+        })
+    }
+}
+
 impl Transport for ModbusTransport {
     fn name(&self) -> &'static str {
         "modbus"
@@ -318,6 +359,24 @@ impl Loopback for ModbusTransport {
 mod tests {
     use super::*;
     use transport::payload::edge_payloads;
+
+    #[test]
+    fn modbus_declares_its_settings_and_reads_through_them() {
+        use xcore::settings::Given;
+        assert!(ModbusTransport::SETTINGS.problems().is_empty());
+        let given = [
+            ("unit".to_string(), Given::Integer(17)),
+            ("timeout".to_string(), Given::Text("5s".to_string())),
+        ];
+        let built = ModbusTransport::open("10.0.0.5:502", Applies::Send, &given).expect("built");
+        assert_eq!(built.bind, "10.0.0.5:502");
+        assert_eq!(built.unit, 17);
+        assert_eq!(built.timeout, Some(Duration::from_secs(5)));
+        let Err(refused) = ModbusTransport::open("0.0.0.0:502", Applies::Receive, &given) else {
+            panic!("a Receive Location addresses no unit");
+        };
+        assert!(refused.message.contains("\"unit\""), "{refused}");
+    }
 
     #[test]
     fn a_loopback_round_carries_a_stream_as_transactions() {
