@@ -73,7 +73,7 @@ pub fn frame(header: Header, pdu: &[u8]) -> Result<Vec<u8>> {
 /// # Errors
 /// A connection that closes mid-frame, a protocol identifier that is not
 /// Modbus, or a length outside what an ADU may carry.
-pub fn read_adu(reader: &mut impl Read) -> Result<Option<Adu>> {
+fn read_adu(reader: &mut impl Read) -> Result<Option<Adu>> {
     let mut head = [0u8; 7];
     let first = reader
         .read(&mut head[..1])
@@ -201,7 +201,7 @@ impl ModbusTransport {
 
     /// The unit identifier a Send Location addresses.
     #[must_use]
-    pub const fn for_unit(mut self, unit: u8) -> Self {
+    const fn for_unit(mut self, unit: u8) -> Self {
         self.unit = unit;
         self
     }
