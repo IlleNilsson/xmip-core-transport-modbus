@@ -13,136 +13,44 @@
 //! longer than one PDU travels. Which registers mean what is a contract's
 //! business, not this one's.
 //!
+//! **The client is answered after the whole receive cycle.** It waits on its
+//! connection for the response: an empty response on
+//! [`transport::Verdict::Accepted`]; on [`transport::Verdict::Refused`] an
+//! exception the client does not send again (MODBUS Application Protocol
+//! V1.1b3, section 7) — *illegal function* ([`adu::ILLEGAL_FUNCTION`]) for
+//! a sender not identified or not permitted, *illegal data value*
+//! ([`adu::ILLEGAL_DATA_VALUE`]) for content refused; the exception *server
+//! device busy* ([`adu::SERVER_DEVICE_BUSY`]) on
+//! [`transport::Verdict::Failed`], which tells it to send the request again.
+//! Each request arrives whole, and the connection is kept for the client's
+//! next.
+//!
 //! The origin URI carries what the header knew:
 //! `modbus://peer/unit/1?transaction=7`.
 
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+pub mod adu;
+pub mod connection;
+
+use std::io::Write;
+use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
+pub use adu::{Adu, Header, MAX_PDU, frame};
+pub use connection::{Connection, Request};
 use transport::Configured;
-use transport::error::{Result, classify, protocol_error};
-use transport::kept::Kept;
+use transport::error::{Result, TransportError, classify, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+use transport::serving::Serving;
 use transport::socket;
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Directions, Taken, Transport};
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
-/// The Modbus protocol identifier in the MBAP header: always zero.
-const PROTOCOL: u16 = 0;
-/// The most a PDU may be: Modbus caps an ADU at 260 bytes.
-pub const MAX_PDU: usize = 253;
+use crate::adu::{SERVER_DEVICE_BUSY, exception_code, read_adu};
 
-/// The MBAP header, ADU less the PDU.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Header {
-    pub transaction: u16,
-    pub unit: u8,
-}
-
-/// One application data unit, split.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Adu {
-    pub header: Header,
-    pub pdu: Vec<u8>,
-}
-
-/// Frame `pdu` under `header`.
-///
-/// # Errors
-/// A PDU over [`MAX_PDU`] does not fit the length field Modbus gives it.
-pub fn frame(header: Header, pdu: &[u8]) -> Result<Vec<u8>> {
-    if pdu.len() > MAX_PDU {
-        return Err(protocol_error(
-            "a PDU over 253 bytes does not fit a Modbus ADU",
-        ));
-    }
-    let length = u16::try_from(pdu.len() + 1).unwrap_or(0);
-    let mut out = Vec::with_capacity(7 + pdu.len());
-    out.extend_from_slice(&header.transaction.to_be_bytes());
-    out.extend_from_slice(&PROTOCOL.to_be_bytes());
-    out.extend_from_slice(&length.to_be_bytes());
-    out.push(header.unit);
-    out.extend_from_slice(pdu);
-    Ok(out)
-}
-
-/// Read one ADU from `reader`, or `None` when the peer closed between ADUs.
-///
-/// # Errors
-/// A connection that closes mid-frame, a protocol identifier that is not
-/// Modbus, or a length outside what an ADU may carry.
-fn read_adu(reader: &mut impl Read) -> Result<Option<Adu>> {
-    let mut head = [0u8; 7];
-    let first = reader
-        .read(&mut head[..1])
-        .map_err(|e| classify("reading the MBAP header", &e))?;
-    if first == 0 {
-        return Ok(None);
-    }
-    reader
-        .read_exact(&mut head[1..])
-        .map_err(|e| classify("reading the MBAP header", &e))?;
-    let transaction = u16::from_be_bytes([head[0], head[1]]);
-    let protocol = u16::from_be_bytes([head[2], head[3]]);
-    let length = usize::from(u16::from_be_bytes([head[4], head[5]]));
-    if protocol != PROTOCOL {
-        return Err(protocol_error("a protocol identifier that is not Modbus"));
-    }
-    if length == 0 || length > MAX_PDU + 1 {
-        return Err(protocol_error(
-            "a length outside what a Modbus ADU may carry",
-        ));
-    }
-    let mut pdu = vec![0u8; length - 1];
-    reader
-        .read_exact(&mut pdu)
-        .map_err(|e| classify("reading the PDU", &e))?;
-    Ok(Some(Adu {
-        header: Header {
-            transaction,
-            unit: head[6],
-        },
-        pdu,
-    }))
-}
-
-/// The server's side of one connection: requests in turn, each answered.
-pub struct Connection {
-    stream: TcpStream,
-    peer: SocketAddr,
-}
-
-impl Connection {
-    /// The next request, or `None` when the client closed the connection.
-    ///
-    /// # Errors
-    /// A malformed ADU, or a connection that broke mid-frame.
-    pub fn next_request(&mut self) -> Result<Option<(Arrived, Header)>> {
-        let Some(adu) = read_adu(&mut self.stream)? else {
-            return Ok(None);
-        };
-        let origin = format!(
-            "modbus://{}/unit/{}?transaction={}",
-            self.peer, adu.header.unit, adu.header.transaction
-        );
-        Ok(Some((Arrived::new(origin, adu.pdu), adu.header)))
-    }
-
-    /// Answer a request under its own transaction and unit.
-    ///
-    /// # Errors
-    /// Where the peer went away before the answer, or the PDU does not fit.
-    pub fn respond(&mut self, header: Header, pdu: &[u8]) -> Result<()> {
-        self.stream
-            .write_all(&frame(header, pdu)?)
-            .map_err(|e| classify("writing the response", &e))?;
-        self.stream
-            .flush()
-            .map_err(|e| classify("flushing the response", &e))
-    }
-}
+/// Exception code 05, *acknowledge*: the server took a long request and is
+/// still working on it.
+const ACKNOWLEDGE: u8 = 0x05;
 
 /// The client's side of one connection: transactions numbered in turn.
 pub struct Client {
@@ -178,13 +86,25 @@ impl Client {
     }
 }
 
+/// The failure an exception response says, where the response is one:
+/// *acknowledge* and *server device busy* retryable, the rest permanent.
+fn refusal(response: &[u8]) -> Option<TransportError> {
+    let code = exception_code(response)?;
+    let said = format!("the server answered exception {code:#04x}");
+    Some(match code {
+        ACKNOWLEDGE | SERVER_DEVICE_BUSY => TransportError::retryable(said),
+        _ => TransportError::permanent(said),
+    })
+}
+
 #[derive(Clone)]
 pub struct ModbusTransport {
     bind: String,
     timeout: Option<Duration>,
     unit: u8,
-    /// The listener the first receive binds, and every receive takes from.
-    receiving: Kept<TcpListener>,
+    /// The listener the first receive binds, and the clients' connections
+    /// kept open on it between their requests.
+    receiving: Serving<Connection>,
 }
 
 impl ModbusTransport {
@@ -195,7 +115,7 @@ impl ModbusTransport {
             bind: bind.into(),
             timeout: None,
             unit: 1,
-            receiving: Kept::new(),
+            receiving: Serving::new(),
         }
     }
 
@@ -227,7 +147,7 @@ impl ModbusTransport {
     /// Where the connection could not be accepted.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Connection> {
         let (stream, peer) = socket::accept_tcp(listener, self.timeout)?;
-        Ok(Connection { stream, peer })
+        Ok(Connection::new(stream, peer))
     }
 
     /// Connect to `target` as a client.
@@ -300,22 +220,30 @@ impl Transport for ModbusTransport {
         Directions::BOTH
     }
 
-    /// One client's requests, each acknowledged with an empty response so the
-    /// client proceeds. A Location that answers with data drives [`Connection`].
-    /// Taken from the listener the first receive bound and kept.
-    fn receive(&self) -> Result<Vec<Arrived>> {
-        let listener = self.receiving.bound(|| self.bind())?;
-        let mut connection = self.accept_one(listener)?;
-        let mut arrived = Vec::new();
-        while let Some((request, header)) = connection.next_request()? {
-            connection.respond(header, &[])?;
-            arrived.push(request);
-        }
-        Ok(arrived)
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Ordered("a connection's requests are answered in the order they came")
     }
 
+    /// The next request from whichever client sends first, on the listener
+    /// the first receive bound and kept, whole. The client waits for its
+    /// response until the receive cycle has ended: an empty response on
+    /// accepted, the exception *server device busy* on refused. Its
+    /// connection is kept for its next request.
+    fn receive(&self) -> Result<Vec<Arrived>> {
+        let arrived = self.receiving.next(
+            || self.bind(),
+            self.timeout,
+            |stream, peer| Ok(Connection::new(stream, peer)),
+            Connection::turn,
+        )?;
+        Ok(vec![arrived])
+    }
+
+    /// One request; an exception response fails the send, retryable where
+    /// the server said *acknowledge* or *server device busy*.
     fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
-        self.exchange(target, bytes).map(|_| ())
+        let response = self.exchange(target, bytes)?;
+        refusal(&response).map_or(Ok(()), Err)
     }
 }
 
@@ -329,16 +257,16 @@ impl ModbusTransport {
 }
 
 impl Accepting for ModbusTransport {
-    fn take_one(self, listener: &TcpListener) -> Result<Arrived> {
+    fn take_one(self, listener: &TcpListener) -> Result<Taken> {
         let mut connection = self.accept_one(listener)?;
         let mut origin = String::from("modbus://");
         let mut bytes = Vec::new();
-        while let Some((arrived, header)) = connection.next_request()? {
-            connection.respond(header, &arrived.bytes)?;
-            origin = arrived.origin_uri;
-            bytes.extend_from_slice(&arrived.bytes);
+        while let Some(request) = connection.next_request()? {
+            connection.respond(request.header, &request.pdu)?;
+            origin = request.origin_uri;
+            bytes.extend_from_slice(&request.pdu);
         }
-        Ok(Arrived::new(origin, bytes))
+        Ok(Taken::new(origin, bytes))
     }
 }
 
@@ -363,16 +291,65 @@ impl Loopback for ModbusTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use transport::Refusal;
     use transport::payload::edge_payloads;
 
     #[test]
     fn every_receive_takes_from_the_listener_the_first_bound() {
         let receiver = ModbusTransport::loopback();
-        receiver.receiving.bound(|| receiver.bind()).expect("bound");
-        let address = receiver.receiving.address().expect("address");
-        transport::kept::held_across_receives(&receiver, address, 5, |at, payload| {
+        let address = receiver
+            .receiving
+            .bound(|| receiver.bind())
+            .expect("bound")
+            .to_string();
+        transport::kept::held_across_receives(&receiver, &address, 5, |at, payload| {
             ModbusTransport::loopback().send(at, payload)
         });
+    }
+
+    #[test]
+    fn a_request_is_answered_by_its_verdict_refused_for_good_failed_busy_then_accepted() {
+        const WRITE: &[u8] = &[0x10, 0x00, 0x01, 0x00, 0x01, 0x02, 0x00, 0x2a];
+        let receiver = ModbusTransport::loopback();
+        let address = receiver
+            .receiving
+            .bound(|| receiver.bind())
+            .expect("bound")
+            .to_string();
+        // One client sends the request, is answered, and sends it again.
+        let client = std::thread::spawn(move || {
+            let mut client = ModbusTransport::loopback()
+                .connect(&address)
+                .expect("connecting");
+            [0; 4].map(|_| client.request(WRITE))
+        });
+        for why in [Refusal::Forbidden, Refusal::Unacceptable] {
+            let mut refused = receiver.receive().expect("refused");
+            let refused = refused.remove(0);
+            assert!(refused.defers(), "the client waits for the verdict");
+            refused.refused(why).expect("answered");
+        }
+        let mut failed = receiver.receive().expect("the third");
+        failed.remove(0).failed().expect("busy");
+        let mut again = receiver
+            .receive()
+            .expect("the fourth, on the kept connection");
+        let again = again.remove(0).taken().expect("accepted");
+        assert_eq!(again.bytes, WRITE);
+        assert!(again.origin_uri.ends_with("?transaction=4"));
+        let [forbidden, unacceptable, failed, accepted] = client.join().expect("client thread");
+        for (refused, code) in [
+            (forbidden, adu::ILLEGAL_FUNCTION),
+            (unacceptable, adu::ILLEGAL_DATA_VALUE),
+        ] {
+            let refused = refused.expect("answered");
+            assert_eq!(refused, [0x90, code]);
+            assert!(!refusal(&refused).expect("a refusal").retryable);
+        }
+        let failed = failed.expect("answered");
+        assert_eq!(failed, [0x90, SERVER_DEVICE_BUSY]);
+        assert!(refusal(&failed).expect("a refusal").retryable);
+        assert_eq!(accepted.expect("answered"), Vec::<u8>::new());
     }
 
     #[test]
@@ -419,36 +396,6 @@ mod tests {
     }
 
     #[test]
-    fn an_adu_round_trips_and_a_bad_one_is_refused() {
-        let header = Header {
-            transaction: 7,
-            unit: 3,
-        };
-        let framed = frame(header, &[0x03, 0x00, 0x10, 0x00, 0x02]).expect("frame");
-        assert_eq!(framed, [0, 7, 0, 0, 0, 6, 3, 0x03, 0x00, 0x10, 0x00, 0x02]);
-        let adu = read_adu(&mut framed.as_slice()).expect("adu").expect("one");
-        assert_eq!(adu.header, header);
-        assert_eq!(adu.pdu, [0x03, 0x00, 0x10, 0x00, 0x02]);
-        assert!(
-            read_adu(&mut &[][..]).expect("closed").is_none(),
-            "closed between"
-        );
-        assert!(
-            read_adu(&mut &[0, 1, 0, 9, 0, 2, 1, 0][..]).is_err(),
-            "not Modbus"
-        );
-        assert!(
-            read_adu(&mut &[0, 1, 0, 0, 0, 0, 1][..]).is_err(),
-            "zero length"
-        );
-        assert!(
-            read_adu(&mut &[0, 1, 0, 0][..]).is_err(),
-            "closed mid-frame"
-        );
-        assert!(frame(header, &[0; 254]).is_err(), "too long");
-    }
-
-    #[test]
     fn transactions_follow_in_turn_on_one_connection() {
         let server = ModbusTransport::new("127.0.0.1:0").timing_out_after(Duration::from_secs(2));
         let (listener, address) = server.bind().expect("binding");
@@ -463,21 +410,23 @@ mod tests {
             (first, second)
         });
         let mut connection = server.accept_one(&listener).expect("accepting");
-        let (arrived, header) = connection
+        let request = connection
             .next_request()
             .expect("first")
             .expect("a request");
-        assert_eq!(arrived.bytes, [0x03, 0x00, 0x10, 0x00, 0x02]);
-        assert!(arrived.origin_uri.contains("/unit/9?transaction=1"));
+        assert_eq!(request.pdu, [0x03, 0x00, 0x10, 0x00, 0x02]);
+        assert!(request.origin_uri.contains("/unit/9?transaction=1"));
         connection
-            .respond(header, &[0x03, 0x04, 0x00, 0x2a, 0x00, 0x01])
+            .respond(request.header, &[0x03, 0x04, 0x00, 0x2a, 0x00, 0x01])
             .expect("responding");
-        let (arrived, header) = connection
+        let request = connection
             .next_request()
             .expect("second")
             .expect("a request");
-        assert!(arrived.origin_uri.ends_with("?transaction=2"));
-        connection.respond(header, &arrived.bytes).expect("echoing");
+        assert!(request.origin_uri.ends_with("?transaction=2"));
+        connection
+            .respond(request.header, &request.pdu)
+            .expect("echoing");
         assert!(connection.next_request().expect("closed").is_none());
         let (first, second) = client.join().expect("client thread");
         assert_eq!(first.expect("first"), [0x03, 0x04, 0x00, 0x2a, 0x00, 0x01]);
