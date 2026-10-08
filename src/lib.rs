@@ -37,6 +37,7 @@ use std::time::Duration;
 
 pub use adu::{Adu, Header, MAX_PDU, frame};
 pub use connection::{Connection, Request};
+use transport::ArrivalIdentity;
 use transport::Configured;
 use transport::error::{Result, TransportError, classify, protocol_error};
 use transport::listening::{Accepting, Listening};
@@ -266,13 +267,17 @@ impl Accepting for ModbusTransport {
             origin = request.origin_uri;
             bytes.extend_from_slice(&request.pdu);
         }
-        Ok(Taken::new(origin, bytes))
+        Ok(Taken::new(origin, bytes).from_peer(connection.peer()))
     }
 }
 
 /// A Stream longer than one PDU travels as transactions in turn on one
 /// connection, each echoed back before the next goes.
 impl Loopback for ModbusTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::PEER
+    }
+
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         Ok(Box::new(Listening::new(self.clone(), self.bind()?)))
     }

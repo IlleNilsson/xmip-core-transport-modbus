@@ -35,6 +35,12 @@ impl Connection {
         Self { stream, peer }
     }
 
+    /// The client the connection is from.
+    #[must_use]
+    pub const fn peer(&self) -> SocketAddr {
+        self.peer
+    }
+
     /// The next request, or `None` when the client closed the connection.
     ///
     /// # Errors
@@ -87,7 +93,9 @@ impl Connection {
             };
             held.with(|stream| write_response(stream, header, &answer))
         });
-        Ok(Some(Arrived::whole(origin_uri, pdu, acknowledgement)))
+        Ok(Some(
+            Arrived::whole(origin_uri, pdu, acknowledgement).from_peer(self.peer),
+        ))
     }
 
     /// One turn for a kept listener: the next arrival, or the client gone.
