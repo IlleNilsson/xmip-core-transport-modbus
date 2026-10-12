@@ -225,6 +225,10 @@ impl Transport for ModbusTransport {
         transport::Arrivals::Ordered("a connection's requests are answered in the order they came")
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("the listener waits for a request")
+    }
+
     /// The next request from whichever client sends first, on the listener
     /// the first receive bound and kept, whole. The client waits for its
     /// response until the receive cycle has ended: an empty response on
