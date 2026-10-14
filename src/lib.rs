@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn modbus_declares_its_settings_and_reads_through_them() {
         use xcore::settings::Given;
-        assert!(ModbusTransport::SETTINGS.problems().is_empty());
+        assert_eq!(ModbusTransport::SETTINGS.problems(), [] as [String; 0]);
         let given = [
             ("unit".to_string(), Given::Integer(17)),
             ("timeout".to_string(), Given::Text("5s".to_string())),
