@@ -234,7 +234,7 @@ impl Transport for ModbusTransport {
     /// response until the receive cycle has ended: an empty response on
     /// accepted, the exception *server device busy* on refused. Its
     /// connection is kept for its next request.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         let arrived = self.receiving.next(
             || self.bind(),
             self.timeout,
@@ -244,9 +244,14 @@ impl Transport for ModbusTransport {
         Ok(vec![arrived])
     }
 
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered("one Modbus write carries the whole body")
+    }
+
     /// One request; an exception response fails the send, retryable where
     /// the server said *acknowledge* or *server device busy*.
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
         let response = self.exchange(target, bytes)?;
         refusal(&response).map_or(Ok(()), Err)
     }
