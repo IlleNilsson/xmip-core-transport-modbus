@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn a_listening_socket_has_no_artefact_to_claim() {
+    fn a_listening_socket_has_no_artifact_to_claim() {
         assert!(ModbusTransport::new("127.0.0.1:0").claims().is_none());
         assert_eq!(ModbusTransport::new("127.0.0.1:0").name(), "modbus");
     }
