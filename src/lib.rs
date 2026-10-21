@@ -25,6 +25,11 @@
 //! Each request arrives whole, and the connection is kept for the client's
 //! next.
 //!
+//! **A Send Location keeps its connection too**: one per server in the
+//! capability's pool (`transport::Pool`), request after request, the
+//! transaction numbers going on. Until 2026-10-21 every send opened a
+//! connection of its own.
+//!
 //! The origin URI carries what the header knew:
 //! `modbus://peer/unit/1?transaction=7`.
 
@@ -42,9 +47,11 @@ use transport::Configured;
 use transport::error::{Result, TransportError, classify, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+use transport::pool::quiet;
 use transport::serving::Serving;
 use transport::socket;
 use transport::{Arrived, Directions, Taken, Transport};
+use transport::{Pool, Pooled};
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
 use crate::adu::{SERVER_DEVICE_BUSY, exception_code, read_adu};
@@ -58,6 +65,14 @@ pub struct Client {
     stream: TcpStream,
     unit: u8,
     transaction: u16,
+}
+
+impl Pooled for Client {
+    /// A server speaks only when asked, so anything it sent to an idle
+    /// connection, or its close, lets the connection go.
+    fn usable(&mut self) -> bool {
+        quiet(&self.stream)
+    }
 }
 
 impl Client {
@@ -103,6 +118,8 @@ pub struct ModbusTransport {
     bind: String,
     timeout: Option<Duration>,
     unit: u8,
+    /// The connection kept to each server, shared by every clone.
+    clients: Pool<Client>,
     /// The listener the first receive binds, and the clients' connections
     /// kept open on it between their requests.
     receiving: Serving<Connection>,
@@ -116,6 +133,7 @@ impl ModbusTransport {
             bind: bind.into(),
             timeout: None,
             unit: 1,
+            clients: Pool::new(),
             receiving: Serving::new(),
         }
     }
@@ -164,12 +182,19 @@ impl ModbusTransport {
         })
     }
 
-    /// One request to `target`, on a connection of its own.
+    /// One request to `target`, on the connection kept to it or a new one,
+    /// kept for the next: a connection carries transaction after
+    /// transaction. Until 2026-10-21 every request opened a connection of
+    /// its own.
     ///
     /// # Errors
     /// As [`ModbusTransport::connect`] and [`Client::request`].
     pub fn exchange(&self, target: &str, pdu: &[u8]) -> Result<Vec<u8>> {
-        self.connect(target)?.request(pdu)
+        self.clients.exchange(
+            target,
+            || self.connect(target),
+            |client| client.request(pdu),
+        )
     }
 }
 
@@ -445,6 +470,39 @@ mod tests {
         let (first, second) = client.join().expect("client thread");
         assert_eq!(first.expect("first"), [0x03, 0x04, 0x00, 0x2a, 0x00, 0x01]);
         assert_eq!(second.expect("second"), [0x06, 0x00, 0x01, 0x00, 0x2a]);
+    }
+
+    #[test]
+    fn a_hundred_sends_to_one_server_open_one_connection_and_every_receive_takes_from_it() {
+        // Until 2026-10-21 every send opened a connection of its own.
+        const ROUNDS: usize = 100;
+        let receiver = ModbusTransport::loopback();
+        let address = receiver
+            .receiving
+            .bound(|| receiver.bind())
+            .expect("bound")
+            .to_string();
+        let sender = std::thread::spawn(move || {
+            let sender = ModbusTransport::loopback();
+            let shared = sender.clone();
+            for round in 0..ROUNDS {
+                let by = if round % 2 == 0 { &sender } else { &shared };
+                let pdu = [0x06, 0x00, 0x01, 0x00, u8::try_from(round).expect("small")];
+                by.send(&address, &pdu).expect("answered");
+            }
+            sender.clients.opened()
+        });
+        for round in 1..=ROUNDS {
+            let taken = receiver.receive().expect("received").remove(0);
+            let taken = taken.taken().expect("accepted");
+            assert!(
+                taken.origin_uri.ends_with(&format!("?transaction={round}")),
+                "{}: the transactions go on, on one connection",
+                taken.origin_uri
+            );
+        }
+        assert_eq!(sender.join().expect("sender"), 1, "one connection");
+        assert_eq!(receiver.receiving.open(), 1);
     }
 
     #[test]

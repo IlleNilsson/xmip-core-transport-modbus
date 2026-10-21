@@ -2,7 +2,7 @@
 
 Modbus TCP transport: one MBAP-framed request or response is one Stream, the function code and unit id kept beside it. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
 
-A Receive Location keeps its listener, bound on the first receive, and the clients' connections open on it between their requests (`transport::serving::Serving`): each receive takes the next request from whichever client sends first. Until 2026-09-27 each receive bound a listener of its own and a peer between receives was refused; until 2026-10-02 a receive read one client's requests until it closed.
+A Receive Location keeps its listener, bound on the first receive, and the clients' connections open on it between their requests (`transport::serving::Serving`): each receive takes the next request from whichever client sends first. Until 2026-09-27 each receive bound a listener of its own and a peer between receives was refused; until 2026-10-02 a receive read one client's requests until it closed. A Send Location keeps one connection per server (`transport::Pool`), request after request, its transaction numbers going on; until 2026-10-21 every send opened a connection of its own.
 
 ## Acknowledgement
 
