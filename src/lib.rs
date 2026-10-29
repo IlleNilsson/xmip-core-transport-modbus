@@ -224,6 +224,9 @@ impl Configured for ModbusTransport {
         ],
     };
 
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["modbus"];
+
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let mut transport = Self::new(address);
         if let Some(unit) = settings.optional_integer("unit") {
