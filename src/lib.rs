@@ -249,6 +249,11 @@ impl Transport for ModbusTransport {
         Directions::BOTH
     }
 
+    /// The callers turned away at their own connection (`transport::serving`).
+    fn turned_away(&self) -> transport::Turned {
+        self.receiving.turned_away()
+    }
+
     fn arrivals(&self) -> transport::Arrivals {
         transport::Arrivals::Ordered("a connection's requests are answered in the order they came")
     }
