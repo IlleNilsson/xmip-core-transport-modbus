@@ -5,6 +5,7 @@ use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 
 use transport::answer::Answer;
+use transport::deadline::Within;
 use transport::error::{Result, classify};
 use transport::serving::{Open, Turn};
 use transport::{Acknowledgement, Arrived, Refusal, Verdict};
@@ -22,16 +23,17 @@ pub struct Request {
     pub pdu: Vec<u8>,
 }
 
-/// The server's side of one connection: requests in turn, each answered.
+/// The server's side of one connection: requests in turn, each answered,
+/// each read within its turn.
 pub struct Connection {
-    stream: TcpStream,
+    stream: Within,
     peer: SocketAddr,
 }
 
 impl Connection {
     /// A connection a client opened from `peer`.
     #[must_use]
-    pub const fn new(stream: TcpStream, peer: SocketAddr) -> Self {
+    pub const fn new(stream: Within, peer: SocketAddr) -> Self {
         Self { stream, peer }
     }
 
@@ -73,7 +75,7 @@ impl Connection {
         let Some(request) = self.next_request()? else {
             return Ok(None);
         };
-        let held = Answer::held(&self.stream)?;
+        let held = Answer::held(self.stream.socket())?;
         let Request {
             origin_uri,
             header,
@@ -117,11 +119,11 @@ impl Connection {
 
 impl Open for Connection {
     fn socket(&self) -> &TcpStream {
-        &self.stream
+        self.stream.socket()
     }
 }
 
-fn write_response(stream: &mut TcpStream, header: Header, pdu: &[u8]) -> Result<()> {
+fn write_response(stream: &mut impl Write, header: Header, pdu: &[u8]) -> Result<()> {
     stream
         .write_all(&frame(header, pdu)?)
         .map_err(|e| classify("writing the response", &e))?;

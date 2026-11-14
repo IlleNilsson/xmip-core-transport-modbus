@@ -44,6 +44,7 @@ pub use adu::{Adu, Header, MAX_PDU, frame};
 pub use connection::{Connection, Request};
 use transport::ArrivalIdentity;
 use transport::Configured;
+use transport::deadline::Within;
 use transport::error::{Result, TransportError, classify, protocol_error};
 use transport::listening::{Accepting, Listening};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
@@ -166,7 +167,7 @@ impl ModbusTransport {
     /// Where the connection could not be accepted.
     pub fn accept_one(&self, listener: &TcpListener) -> Result<Connection> {
         let (stream, peer) = socket::accept_tcp(listener, self.timeout)?;
-        Ok(Connection::new(stream, peer))
+        Ok(Connection::new(Within::new(stream), peer))
     }
 
     /// Connect to `target` as a client.
@@ -237,6 +238,12 @@ impl Configured for ModbusTransport {
             Some(timeout) => transport.timing_out_after(timeout),
             None => transport,
         })
+    }
+
+    /// Each client's turn on a Receive Location taking at most `turn`.
+    fn turning_within(mut self, turn: Duration) -> Self {
+        self.receiving = self.receiving.turning_within(turn);
+        self
     }
 }
 
