@@ -146,13 +146,6 @@ impl ModbusTransport {
         self
     }
 
-    /// Give up on a peer that stops mid-frame.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// Bind and report the address actually assigned.
     ///
     /// # Errors
@@ -215,18 +208,20 @@ impl Configured for ModbusTransport {
                 meaning: "The unit identifier a Send Location addresses; unit 1 when left out.",
                 applies: Applies::Send,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long a connection is waited for and a peer that stops mid-frame.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long a connection is waited for and a peer that stops mid-frame.",
+            ),
         ],
     };
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["modbus"];
+
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
 
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let mut transport = Self::new(address);
@@ -234,10 +229,7 @@ impl Configured for ModbusTransport {
             // The declaration holds it within a byte.
             transport = transport.for_unit(u8::try_from(unit).unwrap_or(0));
         }
-        Ok(match settings.optional_duration("timeout") {
-            Some(timeout) => transport.timing_out_after(timeout),
-            None => transport,
-        })
+        Ok(transport)
     }
 
     /// Each client's turn on a Receive Location taking at most `turn`.
