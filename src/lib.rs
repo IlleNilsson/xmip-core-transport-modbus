@@ -121,7 +121,7 @@ pub struct ModbusTransport {
     unit: u8,
     /// The connection kept to each server, shared by every clone.
     clients: Pool<Client>,
-    /// The listener the first receive binds, and the clients' connections
+    /// The listener its open binds, and the clients' connections
     /// kept open on it between their requests.
     receiving: Serving<Connection>,
 }
@@ -243,6 +243,12 @@ impl Configured for ModbusTransport {
         self.receiving = self.receiving.timed_by(clock);
         self
     }
+
+    /// The listener every receive takes from, bound where a Receive
+    /// Location listens for clients.
+    fn listening(&self) -> Result<Option<&str>> {
+        self.receiving.bound(|| self.bind()).map(Some)
+    }
 }
 
 impl Transport for ModbusTransport {
@@ -268,13 +274,12 @@ impl Transport for ModbusTransport {
     }
 
     /// The next request from whichever client sends first, on the listener
-    /// the first receive bound and kept, whole. The client waits for its
+    /// its open bound and kept, whole. The client waits for its
     /// response until the receive cycle has ended: an empty response on
     /// accepted, the exception *server device busy* on refused. Its
     /// connection is kept for its next request.
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         let arrived = self.receiving.next(
-            || self.bind(),
             self.timeout,
             |stream, peer| Ok(Connection::new(stream, peer)),
             Connection::turn,
