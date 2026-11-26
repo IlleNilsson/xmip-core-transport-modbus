@@ -32,42 +32,72 @@
 //!
 //! The origin URI carries what the header knew:
 //! `modbus://peer/unit/1?transaction=7`.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "default")]
 pub mod adu;
+#[cfg(feature = "default")]
 pub mod connection;
+#[cfg(feature = "declaration")]
+pub mod declaration;
 
+#[cfg(feature = "default")]
 use std::io::Write;
+#[cfg(feature = "default")]
 use std::net::{TcpListener, TcpStream};
+#[cfg(feature = "default")]
 use std::time::Duration;
 
+#[cfg(feature = "default")]
 pub use adu::{Adu, Header, MAX_PDU, frame};
+#[cfg(feature = "default")]
 pub use connection::{Connection, Request};
+#[cfg(feature = "default")]
 use transport::ArrivalIdentity;
+#[cfg(feature = "default")]
 use transport::Configured;
+#[cfg(feature = "default")]
 use transport::deadline::Within;
+#[cfg(feature = "default")]
 use transport::error::{Result, TransportError, classify, protocol_error};
+#[cfg(feature = "default")]
 use transport::listening::{Accepting, Listening};
+#[cfg(feature = "default")]
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+#[cfg(feature = "default")]
 use transport::pool::quiet;
+#[cfg(feature = "default")]
 use transport::serving::Serving;
+#[cfg(feature = "default")]
 use transport::socket;
+#[cfg(feature = "default")]
 use transport::{Arrived, Directions, Taken, Transport};
+#[cfg(feature = "default")]
 use transport::{Pool, Pooled};
-use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
+#[cfg(feature = "default")]
+use xcore::settings::Settings;
 
+#[cfg(feature = "default")]
 use crate::adu::{SERVER_DEVICE_BUSY, exception_code, read_adu};
 
 /// Exception code 05, *acknowledge*: the server took a long request and is
 /// still working on it.
+#[cfg(feature = "default")]
 const ACKNOWLEDGE: u8 = 0x05;
 
 /// The client's side of one connection: transactions numbered in turn.
+#[cfg(feature = "default")]
 pub struct Client {
     stream: TcpStream,
     unit: u8,
     transaction: u16,
 }
 
+#[cfg(feature = "default")]
 impl Pooled for Client {
     /// A server speaks only when asked, so anything it sent to an idle
     /// connection, or its close, lets the connection go.
@@ -76,6 +106,7 @@ impl Pooled for Client {
     }
 }
 
+#[cfg(feature = "default")]
 impl Client {
     /// Send one request PDU and return the response PDU.
     ///
@@ -105,6 +136,7 @@ impl Client {
 
 /// The failure an exception response says, where the response is one:
 /// *acknowledge* and *server device busy* retryable, the rest permanent.
+#[cfg(feature = "default")]
 fn refusal(response: &[u8]) -> Option<TransportError> {
     let code = exception_code(response)?;
     let said = format!("the server answered exception {code:#04x}");
@@ -114,6 +146,7 @@ fn refusal(response: &[u8]) -> Option<TransportError> {
     })
 }
 
+#[cfg(feature = "default")]
 #[derive(Clone)]
 pub struct ModbusTransport {
     bind: String,
@@ -126,6 +159,7 @@ pub struct ModbusTransport {
     receiving: Serving<Connection>,
 }
 
+#[cfg(feature = "default")]
 impl ModbusTransport {
     /// Listen or connect at `bind`, addressing unit 1 when sending.
     #[must_use]
@@ -192,32 +226,10 @@ impl ModbusTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for ModbusTransport {
-    /// The address is where a Receive Location listens as a server and
-    /// where a Send Location connects as a client.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "unit",
-                kind: Kind::Integer {
-                    minimum: 0,
-                    maximum: 255,
-                },
-                presence: Presence::Optional,
-                meaning: "The unit identifier a Send Location addresses; unit 1 when left out.",
-                applies: Applies::Send,
-            },
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long a connection is waited for and a peer that stops mid-frame.",
-            ),
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["modbus"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
         Some(&mut self.timeout)
@@ -251,6 +263,7 @@ impl Configured for ModbusTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Transport for ModbusTransport {
     fn name(&self) -> &'static str {
         "modbus"
@@ -300,6 +313,7 @@ impl Transport for ModbusTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl ModbusTransport {
     /// Both ends on this machine: an ephemeral local port, the loopback
     /// timeout on either side of the connection.
@@ -309,6 +323,7 @@ impl ModbusTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Accepting for ModbusTransport {
     fn take_one(self, listener: &TcpListener) -> Result<Taken> {
         let mut connection = self.accept_one(listener)?;
@@ -325,6 +340,7 @@ impl Accepting for ModbusTransport {
 
 /// A Stream longer than one PDU travels as transactions in turn on one
 /// connection, each echoed back before the next goes.
+#[cfg(feature = "default")]
 impl Loopback for ModbusTransport {
     fn arrival_identity(&self) -> ArrivalIdentity {
         ArrivalIdentity::PEER
@@ -411,7 +427,7 @@ mod tests {
 
     #[test]
     fn modbus_declares_its_settings_and_reads_through_them() {
-        use xcore::settings::Given;
+        use xcore::settings::{Applies, Given};
         assert_eq!(ModbusTransport::SETTINGS.problems(), [] as [String; 0]);
         let given = [
             ("unit".to_string(), Given::Integer(17)),

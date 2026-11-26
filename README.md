@@ -8,6 +8,10 @@ A Receive Location keeps its listener, bound as its transport is opened (`Config
 
 The client is answered after the whole receive cycle: it waits on its connection for the response to its request. Accepted answers the empty response. Refused answers an exception the client does not send again (MODBUS Application Protocol Specification V1.1b3, section 7): *illegal function* (01) for a sender not identified or not permitted, *illegal data value* (03) for content refused. Failed answers the exception *server device busy* (06), which tells the client to send the request again. A request let go without a verdict shuts its connection (`transport::answer::Answer`), so the client is not left waiting and sends it again. A Send Location fails a send the server answers with an exception: retryable on *acknowledge* (05) or *server device busy* (06), permanent otherwise. Each request arrives whole.
 
+## The declaration
+
+What a Location of this technology is configured with is two `const`s in its `declaration` module, `src/declaration.rs`, beside the code, which `Configured` reads (ADR-0064, amendment 2026-11-26): `declaration::SETTINGS`, `unit` and `timeout`, and `SCHEMES`, `modbus`. Built with its `declaration` feature alone (`--no-default-features --features declaration`), the crate is those and nothing more: its code, which is built on nothing beyond the capability and the settings, is behind the default feature. So the library the surfaces load can carry it without the code, for the language server and the desktop to suggest and check a Modbus Location's settings though no node in their process loaded the technology, once the gathering crate of open problem 48 links it. `test/Declaration.Test.ps1` in the estate holds that the declaration builds nothing the transport capability does not.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
